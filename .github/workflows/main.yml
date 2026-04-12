@@ -1,0 +1,112 @@
+name: Generate Plugin Index
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - "index.json"
+      - "index.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  generate-index:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate index.json and index.txt
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const root = process.cwd();
+          const skipDirs = new Set([
+            ".git",
+            ".github",
+            "node_modules",
+            "dist",
+            "target",
+            "coverage",
+            ".turbo",
+            ".next",
+          ]);
+
+          function walk(dir, output = []) {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            const hasManifest = entries.some(
+              (entry) => entry.isFile() && entry.name === "manifest.json",
+            );
+
+            if (hasManifest && dir !== root) {
+              output.push(path.relative(root, dir).replace(/\\/g, "/"));
+              return output;
+            }
+
+            for (const entry of entries) {
+              if (!entry.isDirectory()) continue;
+              if (skipDirs.has(entry.name)) continue;
+              walk(path.join(dir, entry.name), output);
+            }
+            return output;
+          }
+
+          const folders = walk(root).sort((left, right) => left.localeCompare(right));
+          const plugins = folders.map((folder) => {
+            const manifestPath = path.join(root, folder, "manifest.json");
+            const manifestText = fs.readFileSync(manifestPath, "utf8");
+            const manifest = JSON.parse(manifestText);
+            return {
+              folder,
+              manifest,
+            };
+          });
+
+          const indexJson = {
+            schemaVersion: 1,
+            generatedAt: new Date().toISOString(),
+            plugins,
+          };
+
+          fs.writeFileSync(
+            path.join(root, "index.json"),
+            JSON.stringify(indexJson, null, 2) + "\n",
+            "utf8",
+          );
+          fs.writeFileSync(
+            path.join(root, "index.txt"),
+            folders.join("\n") + (folders.length > 0 ? "\n" : ""),
+            "utf8",
+          );
+
+          console.log(`Generated indexes for ${folders.length} plugin folder(s).`);
+          NODE
+
+      - name: Commit index files
+        shell: bash
+        run: |
+          if git diff --quiet -- index.json index.txt; then
+            echo "No index changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.json index.txt
+          git commit -m "chore: regenerate plugin index"
+          git push
